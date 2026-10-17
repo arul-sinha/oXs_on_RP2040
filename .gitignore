@@ -4,3 +4,6 @@
 .vscode/launch.json
 .vscode/ipch
 build
+hx711_driver_EDITS.txt
+hx711_driver/
+circuit.md

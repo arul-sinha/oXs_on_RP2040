@@ -49,6 +49,7 @@
 #include "sx126x_driver.h"
 #include "kx134.h"
 #include "frsky_hub.h"
+#include "hx711.h"
 
 // to do : add rpm, temp telemetry fields to jeti protocol
 //         try to detect MS5611 and other I2C testing the different I2C addresses
@@ -286,6 +287,9 @@ void setupSensors(){     // this runs on core1!!!!!!!!
       setupRpm(); // this function perform the setup of pio Rpm
       //printf("rpm done\n");
       
+      // HX711
+      hx711Setup();
+
       setupEsc() ; 
 
       core1SetupDone = true;
@@ -332,6 +336,9 @@ void getSensors(void){      // this runs on core1 !!!!!!!!!!!!
   }
   readRpm();
   handleEsc();
+
+  hx711Read(); // HX711
+
   #ifdef USE_DS18B20
   ds18b20Read(); 
   #endif
