@@ -3,6 +3,7 @@
 .vscode/c_cpp_properties.json
 .vscode/launch.json
 .vscode/ipch
+.vscode/
 build
 hx711_driver_EDITS.txt
 hx711_driver/
