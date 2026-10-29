@@ -2,6 +2,7 @@
 #include "pico/stdlib.h"
 #include "hardware/gpio.h"
 #include "tools.h"
+#include <math.h>
 
 // ------------------------------------------------------------------
 // GPIO pins used by the HX711.
@@ -72,4 +73,58 @@ void hx711Read(void) {
     // Send the RAW count to core0.
     // We reuse RESERVE6 because no telemetry tables need to be changed.
     sent2Core0(RESERVE6, raw);
+}
+
+// 0 means sensor disconnected or there's no weight / wheight (i cant spell)
+// waits 0.2 s for the scale to be ready, if not calibration will fail..
+int32_t hx711GetRaw(void) {
+    if (hx711DoutPin > 29 || hx711SckPin > 29) return 0;
+    return hx711ReadRaw();
+}
+
+float hx711Calibrate(float knownMassGrams) {
+    if (knownMassGrams <= 0.0f) return 0.0f;
+
+    // 1. take 5 readings, one every 250 ms (~1 s total)
+    int32_t readings[5];
+    for (int i = 0; i < 5; i++) {
+        readings[i] = hx711GetRaw();
+        if (i < 4) sleep_ms(250);
+    }
+
+    // 2. middle value (median) = reference for spotting outliers
+    int32_t sorted[5];
+    for (int i = 0; i < 5; i++) sorted[i] = readings[i];
+    for (int i = 1; i < 5; i++) {
+        int32_t key = sorted[i];
+        int j = i - 1;
+        while (j >= 0 && sorted[j] > key) { sorted[j + 1] = sorted[j]; j--; }
+        sorted[j + 1] = key;
+    }
+    int32_t median = sorted[2];
+
+    // 3. keep only readings close to the median, drop the others
+    float limit = 0.10f * fabsf((float) median);   // "a lot" = more than 10%
+    if (limit < 2000.0f) limit = 2000.0f;          // with a minimum of 2000 counts
+
+    float sum = 0.0f;
+    int kept = 0;
+    for (int i = 0; i < 5; i++) {
+        if (fabsf((float) (readings[i] - median)) <= limit) {
+            sum += (float) readings[i];
+            kept++;
+        }
+    }
+    if (kept == 0) return 0.0f;
+
+    // 4. average of the kept readings
+    float average = sum / (float) kept;
+
+    // 5. grams -> kg -> force in Newtons (at 984 m)
+    float massKg = knownMassGrams / 1000.0f;
+    float force  = 9.81f * powf(6371.0f / (6371.0f + 0.984f), 2.0f) * massKg;
+    if (force <= 0.0f || average == 0.0f) return 0.0f;
+
+    // 6. factor = raw counts per Newton
+    return fabsf(average) / force;
 }
