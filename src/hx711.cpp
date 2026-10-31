@@ -3,6 +3,62 @@
 #include "hardware/gpio.h"
 #include "tools.h"
 #include <math.h>
+#include <string.h>
+#include "pico/multicore.h"
+#include "hardware/flash.h"
+#include "hardware/sync.h"
+#include "hardware/watchdog.h"
+
+// Reserved 4 KB sector: config at +0, sequencer at +4K, gyro at +8K, this at +12K.
+#define CAL_FLASH_OFFSET  (256 * 1024 + 12 * 1024)
+#define CAL_MAGIC         0x48583731u
+
+typedef struct {
+    uint32_t magic;    // marks the record as valid
+    float    factor;   // the value you want to keep
+} calRecord_t;
+
+extern bool multicoreIsRunning;   // defined in main.cpp
+
+static float calFactor = 0.0f;    // 0.0f means "not calibrated yet"
+
+float hx711LoadCalibrationFactor(void) {
+    calRecord_t r;
+    memcpy(&r, (const void *) (XIP_BASE + CAL_FLASH_OFFSET), sizeof(r));
+
+    if (r.magic == CAL_MAGIC && isfinite(r.factor) && r.factor > 0.0f) {
+        calFactor = r.factor;      // valid saved value
+    } else {
+        calFactor = 0.0f;          // blank or corrupted -> not calibrated
+    }
+    return calFactor;
+}
+
+float hx711GetCalibrationFactor(void) {
+    return calFactor;
+}
+
+bool hx711SaveCalibrationFactor(float factor) {
+    if (!isfinite(factor) || factor <= 0.0f) return false;   // refuse bad values
+    if (factor == calFactor) return true;                    // unchanged -> don't erase
+
+    calRecord_t r = { CAL_MAGIC, factor };
+
+    uint8_t page[FLASH_PAGE_SIZE];
+    memset(page, 0xFF, sizeof(page));        // erased flash reads as 0xFF
+    memcpy(page, &r, sizeof(r));
+
+    watchdog_enable(3000, true);             // cover the erase time
+    if (multicoreIsRunning) multicore_lockout_start_blocking();  // pause core1
+    uint32_t irq = save_and_disable_interrupts();                // no ISR from flash
+    flash_range_erase(CAL_FLASH_OFFSET, FLASH_SECTOR_SIZE);
+    flash_range_program(CAL_FLASH_OFFSET, page, FLASH_PAGE_SIZE);
+    restore_interrupts(irq);
+    if (multicoreIsRunning) multicore_lockout_end_blocking();
+
+    calFactor = factor;
+    return true;
+}
 
 // ------------------------------------------------------------------
 // GPIO pins used by the HX711.
@@ -12,8 +68,8 @@
 // ------------------------------------------------------------------
 
 // CHANGE THISSSS
-int hx711DoutPin = 21;   // data output from the HX711 to the RP2040 (needs change)
-int hx711SckPin  = 20;   // serial clock from the RP2040 to the HX711 (needs changeS)
+int hx711DoutPin = 22;   // data output from the HX711 to the RP2040 22
+int hx711SckPin  = 26;   // serial clock from the RP2040 to the HX711 26
 
 // Channel/gain: raw read is done with 24 bits + 1 extra SCK pulse
 // (channel A, gain 128) -> the 25th pulse sets the gain for next read.
@@ -54,6 +110,8 @@ static int32_t hx711ReadRaw(void) {
 }
 
 void hx711Setup(void) {
+    hx711LoadCalibrationFactor();  // load from non-volatile memory at boot
+
     if (hx711DoutPin > 29 || hx711SckPin > 29) {
         return;  // disabled / invalid pins
     }
@@ -69,7 +127,11 @@ void hx711Read(void) {
     if (hx711DoutPin > 29 || hx711SckPin > 29) {
         return;
     }
+
     int32_t raw = hx711ReadRaw();
+    if (calFactor > 0.0f) {
+        raw = (int32_t)(fabsf((float)raw) / calFactor);
+    }
     // Send the RAW count to core0.
     // We reuse RESERVE6 because no telemetry tables need to be changed.
     sent2Core0(RESERVE6, raw);
@@ -126,5 +188,15 @@ float hx711Calibrate(float knownMassGrams) {
     if (force <= 0.0f || average == 0.0f) return 0.0f;
 
     // 6. factor = raw counts per Newton
-    return fabsf(average) / force;
+    float factor = fabsf(average) / force;
+    if (!isfinite(factor) || factor <= 0.0f) return 0.0f;
+
+    // Save to non-volatile memory and use immediately
+    if (hx711SaveCalibrationFactor(factor)) {
+        return factor;
+    }
+
+    // If save failed for some reason, still apply in memory
+    calFactor = factor;
+    return factor;
 }
