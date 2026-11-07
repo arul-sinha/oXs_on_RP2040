@@ -9,4 +9,4 @@ float hx711Calibrate(float knownMassGrams);
 
 float hx711LoadCalibrationFactor(void);
 bool  hx711SaveCalibrationFactor(float factor);
-float hx711GetCalibrationFactor(void);
+// float hx711GetCalibrationFactor(void); USELESS FUNCTION

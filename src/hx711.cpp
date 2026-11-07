@@ -34,9 +34,11 @@ float hx711LoadCalibrationFactor(void) {
     return calFactor;
 }
 
+/* Useless ass function:
 float hx711GetCalibrationFactor(void) {
     return calFactor;
 }
+*/
 
 bool hx711SaveCalibrationFactor(float factor) {
     if (!isfinite(factor) || factor <= 0.0f) return false;   // refuse bad values
@@ -67,9 +69,9 @@ bool hx711SaveCalibrationFactor(float factor) {
 // (or from a test) without touching the rest of the firmware.
 // ------------------------------------------------------------------
 
-// CHANGE THISSSS
 int hx711DoutPin = 22;   // data output from the HX711 to the RP2040 22
-int hx711SckPin  = 26;   // serial clock from the RP2040 to the HX711 26
+int hx711SckPin  = 20;   // serial clock from the RP2040 to the HX711 26
+//static float knownMassGrams = 500.0f; // 500 grams of known mass attache. CHANGE THIS
 
 // Channel/gain: raw read is done with 24 bits + 1 extra SCK pulse
 // (channel A, gain 128) -> the 25th pulse sets the gain for next read.
@@ -137,7 +139,7 @@ void hx711Read(void) {
     sent2Core0(RESERVE6, raw);
 }
 
-// 0 means sensor disconnected or there's no weight / wheight (i cant spell)
+// returns weight / wheight in newtons (i cant spell)
 // waits 0.2 s for the scale to be ready, if not calibration will fail..
 int32_t hx711GetRaw(void) {
     if (hx711DoutPin > 29 || hx711SckPin > 29) return 0;
@@ -145,16 +147,17 @@ int32_t hx711GetRaw(void) {
 }
 
 float hx711Calibrate(float knownMassGrams) {
+    // pray this never happens
     if (knownMassGrams <= 0.0f) return 0.0f;
 
-    // 1. take 5 readings, one every 250 ms (~1 s total)
+    // averages out 5 readings
     int32_t readings[5];
     for (int i = 0; i < 5; i++) {
         readings[i] = hx711GetRaw();
         if (i < 4) sleep_ms(250);
     }
 
-    // 2. middle value (median) = reference for spotting outliers
+    // send bad readings to the trash
     int32_t sorted[5];
     for (int i = 0; i < 5; i++) sorted[i] = readings[i];
     for (int i = 1; i < 5; i++) {
@@ -165,7 +168,6 @@ float hx711Calibrate(float knownMassGrams) {
     }
     int32_t median = sorted[2];
 
-    // 3. keep only readings close to the median, drop the others
     float limit = 0.10f * fabsf((float) median);   // "a lot" = more than 10%
     if (limit < 2000.0f) limit = 2000.0f;          // with a minimum of 2000 counts
 
@@ -179,15 +181,15 @@ float hx711Calibrate(float knownMassGrams) {
     }
     if (kept == 0) return 0.0f;
 
-    // 4. average of the kept readings
+    // average of the kept readings
     float average = sum / (float) kept;
 
-    // 5. grams -> kg -> force in Newtons (at 984 m)
+    // grams -> kg -> force in Newtons (at 984 m) basically taring
     float massKg = knownMassGrams / 1000.0f;
     float force  = 9.81f * powf(6371.0f / (6371.0f + 0.984f), 2.0f) * massKg;
     if (force <= 0.0f || average == 0.0f) return 0.0f;
 
-    // 6. factor = raw counts per Newton
+    // factor = measeured wheight / optimal wheight
     float factor = fabsf(average) / force;
     if (!isfinite(factor) || factor <= 0.0f) return 0.0f;
 
@@ -200,3 +202,15 @@ float hx711Calibrate(float knownMassGrams) {
     calFactor = factor;
     return factor;
 }
+
+// another useless ass function - incomplete tare
+/*
+float fetchDiff(float knownmass) {
+    float current_reading = hx711GetCalibrationFactor();
+
+    float expected_reading = 9.81f * powf(6371.0f / (6371.0f + 0.984f), 2.0f) * knownmass;
+    float diff = fabs(current_reading - expected_reading);  
+
+    return diff;
+}
+*/
