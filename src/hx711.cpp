@@ -3,6 +3,7 @@
 #include "hardware/gpio.h"
 #include "tools.h"
 #include <math.h>
+#include <stdio.h>
 #include <string.h>
 #include "pico/multicore.h"
 #include "hardware/flash.h"
@@ -19,6 +20,18 @@ typedef struct {
 } calRecord_t;
 
 extern bool multicoreIsRunning;   // defined in main.cpp
+
+// filled on core0 from the receiver frames (defined in sbus_out_pwm.cpp)
+extern uint16_t rcChannelsUs[16];
+// timestamp of the last RC channels frame (defined in crsf_in.cpp)
+extern uint32_t lastRcChannels;
+
+// Normally core1 reads the HX711 (hx711Read() in getSensors()).
+// During a calibration, core0 must drive the HX711 pins itself; core1 is then
+// asked to skip the readings (hx711HoldReads) and confirms it by incrementing
+// hx711HoldAck each time it skips one.
+static volatile bool     hx711HoldReads = false;
+static volatile uint32_t hx711HoldAck   = 0;
 
 static float calFactor = 0.0f;    // 0.0f means "not calibrated yet"
 
@@ -71,7 +84,7 @@ bool hx711SaveCalibrationFactor(float factor) {
 
 int hx711DoutPin = 22;   // data output from the HX711 to the RP2040 22
 int hx711SckPin  = 20;   // serial clock from the RP2040 to the HX711 26
-//static float knownMassGrams = 500.0f; // 500 grams of known mass attache. CHANGE THIS
+// The known mass used for the calibration is now HX711_KNOWN_MASS_G in hx711.h
 
 // Channel/gain: raw read is done with 24 bits + 1 extra SCK pulse
 // (channel A, gain 128) -> the 25th pulse sets the gain for next read.
@@ -130,6 +143,11 @@ void hx711Read(void) {
         return;
     }
 
+    if (hx711HoldReads) {     // core0 is running a calibration and drives the HX711:
+        hx711HoldAck++;       // keep hands off the pins and confirm that we did it
+        return;
+    }
+
     int32_t raw = hx711ReadRaw();
     if (calFactor > 0.0f) {
         raw = (int32_t)(fabsf((float)raw) / calFactor);
@@ -146,6 +164,16 @@ int32_t hx711GetRaw(void) {
     return hx711ReadRaw();
 }
 
+// sleep while still feeding the watchdog: the main loop on core0 is blocked
+// while the calibration runs (this function is called by hx711Calibrate).
+static void calDelayMs(uint32_t ms) {
+    uint32_t startMs = millisRp();
+    while ((millisRp() - startMs) < ms) {
+        watchdog_update();
+        sleep_ms(25);
+    }
+}
+
 float hx711Calibrate(float knownMassGrams) {
     // pray this never happens
     if (knownMassGrams <= 0.0f) return 0.0f;
@@ -154,7 +182,7 @@ float hx711Calibrate(float knownMassGrams) {
     int32_t readings[5];
     for (int i = 0; i < 5; i++) {
         readings[i] = hx711GetRaw();
-        if (i < 4) sleep_ms(250);
+        if (i < 4) calDelayMs(250);   // sleep_ms but feeding the watchdog (loop() is blocked here)
     }
 
     // send bad readings to the trash
@@ -201,6 +229,78 @@ float hx711Calibrate(float knownMassGrams) {
     // If save failed for some reason, still apply in memory
     calFactor = factor;
     return factor;
+}
+
+// ------------------------------------------------------------------
+// Calibration requested from the transmitter (FrSky ETHos, ...).
+//
+// The only data a radio can send to the oXs are the RC channels, so a spare
+// channel (HX711_CAL_CHANNEL) is used: when the switch bound to that channel
+// is held "up" during HX711_CAL_HOLD_MS, the calibration starts. The switch
+// has to go back "down" before a new calibration can be started.
+// ------------------------------------------------------------------
+
+// Runs on core0 when the user asked for a calibration from the transmitter.
+// (implementation below)
+static void hx711RunCalibration(void);
+
+// Called from loop() on core0, once the RC channels are in rcChannelsUs[].
+void hx711CheckCalibrationTrigger(void) {
+    static uint32_t highSinceMs = 0;  // 0 = switch not (yet) in the "up" position
+    static bool     armed       = false; // true once the switch has been seen "down"
+
+    if (hx711DoutPin > 29 || hx711SckPin > 29) return; // HX711 is disabled
+    if ((HX711_CAL_CHANNEL < 1) || (HX711_CAL_CHANNEL > 16)) return;
+
+    // keep a fresh RC frame (skip e.g. when the receiver is in failsafe)
+    if ((millisRp() - lastRcChannels) > 200) {
+        highSinceMs = 0;   // reset the hold time
+        return;
+    }
+
+    uint16_t chUs = rcChannelsUs[HX711_CAL_CHANNEL - 1];
+
+    if (chUs >= HX711_CAL_HIGH_US) {              // switch is "up"
+        if (highSinceMs == 0) {
+            highSinceMs = millisRp();              // start measuring the hold time
+        } else if (armed && ((millisRp() - highSinceMs) >= HX711_CAL_HOLD_MS)) {
+            armed = false;                         // no new start while it stays up
+            hx711RunCalibration();
+        }
+    } else {                                       // switch is not "up" (middle or down)
+        highSinceMs = 0;                           // reset the hold time
+        armed = true;                              // ready to trigger once it goes up again
+    }
+}
+
+// Runs on core0 when the user asked for a calibration from the transmitter.
+// core1 normally reads the HX711 (hx711Read()); it is asked to skip the
+// readings while core0 executes the calibration. hx711Calibrate() takes the
+// readings, calculates the factor and stores it in flash (the flash write must
+// be done by core0 because core1 is the multicore lockout victim).
+// This blocks the main loop for about 1.5 sec.
+static void hx711RunCalibration(void) {
+    printf("\nHX711 : calibration requested from the transmitter\n");
+    printf("HX711 : keep the %.0f g reference mass on the load cell\n", (double) HX711_KNOWN_MASS_G);
+
+    // Ask core1 to stop reading the HX711 and wait for the acknowledge.
+    uint32_t ackBefore = hx711HoldAck;
+    hx711HoldReads = true;
+    uint32_t startMs = millisRp();
+    while (hx711HoldAck == ackBefore) {
+        watchdog_update();
+        if ((millisRp() - startMs) > 500) break;   // core1 did not confirm within 500 msec
+    }
+
+    float factor = hx711Calibrate(HX711_KNOWN_MASS_G); // reads, computes and saves the factor
+
+    hx711HoldReads = false;   // core1 may read the HX711 again
+
+    if (factor > 0.0f) {
+        printf("HX711 : calibration done; factor = %.6f (stored in flash)\n", (double) factor);
+    } else {
+        printf("HX711 : calibration failed (check the wiring and the load cell)\n");
+    }
 }
 
 // another useless ass function - incomplete tare

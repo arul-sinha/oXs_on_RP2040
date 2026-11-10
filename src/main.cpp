@@ -687,6 +687,7 @@ void loop() {
         // convert sbusframe in rcChannelUs (when a new sbusframe is received or at least once every 9 msec) and copy to rcChannelUsCorr (so ready to apply gyro corrections)
       // rcChannelsUs is used by logger and sequencer; rcChannelCorrUs is used by Gyro, PWM and SbusOut
       setRcChannels();         // coded in sbus_out_pwm.cpp, set rcChannelsUsCorrChanged and rcChannelsUsChanged 
+      hx711CheckCalibrationTrigger(); // HX711: starts a calibration when the RC switch is held up (see hx711.h)
       if (gyroIsInstalled) {   // coded in Gyro.cpp
         calibrateGyroMixers();   // check if user ask for gyro calibration
         applyGyroCorrections();  // apply corrections (if rcChannelsCorrUs changed) 
