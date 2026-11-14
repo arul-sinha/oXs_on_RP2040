@@ -8,14 +8,14 @@
 // Known reference mass used to calibrate the load cell, in grams.
 // The mass must be on the load cell when the calibration is started.
 // DUMMY VALUE for now: change it to the mass you really use.
-#define HX711_KNOWN_MASS_G   500.0f
+#define HX711_KNOWN_MASS_G   1246.0f
 
 // RC channel (1..16, as numbered on the receiver/transmitter) that triggers
 // the calibration. Bind a switch (ETHos) to this channel.
 // Moving the switch up and holding it there during HX711_CAL_HOLD_MS starts
 // the calibration. The switch has to leave the "up" position before a new
 // calibration can be started.
-#define HX711_CAL_CHANNEL    8
+#define HX711_CAL_CHANNEL    4
 
 // Channel value (in micro sec, 988..2012) above which the switch is
 // considered "up" (a normal full-up switch gives about 2000).
